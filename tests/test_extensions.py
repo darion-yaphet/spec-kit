@@ -225,6 +225,35 @@ class TestExtensionManifest:
             with pytest.raises(ValidationError, match="YAML mapping"):
                 ExtensionManifest(manifest_path)
 
+    def test_utf8_non_ascii_description_loads(self, temp_dir, valid_manifest_data):
+        """Regression for #2325: non-ASCII (UTF-8) description loads on any platform.
+
+        On Windows, Python's default text-mode encoding is the locale codepage
+        (e.g. cp1252/GBK), which raises UnicodeDecodeError on UTF-8 bytes
+        outside the ASCII range. The loader must open with encoding='utf-8'.
+        """
+        import yaml
+
+        valid_manifest_data["extension"]["description"] = "中文测试 — émojis 🚀"
+        manifest_path = temp_dir / "extension.yml"
+        # Write UTF-8 bytes explicitly so the test exercises the read path,
+        # not the (locale-dependent) write path.
+        manifest_path.write_bytes(
+            yaml.safe_dump(valid_manifest_data, allow_unicode=True).encode("utf-8")
+        )
+
+        manifest = ExtensionManifest(manifest_path)
+        assert manifest.description == "中文测试 — émojis 🚀"
+
+    def test_invalid_utf8_bytes_raises_validation_error(self, temp_dir):
+        """Negative case: file containing invalid UTF-8 bytes raises ValidationError, not raw UnicodeDecodeError."""
+        manifest_path = temp_dir / "extension.yml"
+        # 0xFF/0xFE are not valid UTF-8 lead bytes.
+        manifest_path.write_bytes(b"\xff\xfe not valid utf-8 \xff\n")
+
+        with pytest.raises(ValidationError, match="not valid UTF-8"):
+            ExtensionManifest(manifest_path)
+
     def test_invalid_extension_id(self, temp_dir, valid_manifest_data):
         """Test manifest with invalid extension ID format."""
         import yaml
@@ -1817,7 +1846,7 @@ Run {SCRIPT}
         registrar = CommandRegistrar()
         from specify_cli.extensions import ExtensionManifest
         manifest = ExtensionManifest(ext_dir / "extension.yml")
-        registered = registrar.register_commands_for_agent("codex", manifest, ext_dir, project_dir)
+        registrar.register_commands_for_agent("codex", manifest, ext_dir, project_dir)
 
         skill_subdir = skills_dir / "speckit-cleanup-ext-run"
         assert skill_subdir.exists(), "Skill subdirectory should exist after registration"
@@ -2585,7 +2614,8 @@ class TestExtensionCatalog:
     def test_download_extension_sends_auth_header(self, temp_dir, monkeypatch):
         """download_extension passes Authorization header via opener for GitHub URLs."""
         from unittest.mock import patch, MagicMock
-        import zipfile, io
+        import zipfile
+        import io
 
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_testtoken")
         catalog = self._make_catalog(temp_dir)
@@ -3440,7 +3470,7 @@ class TestExtensionAddCLI:
         mock_catalog.search.return_value = []
 
         with patch("specify_cli.extensions.ExtensionCatalog", return_value=mock_catalog), \
-             patch("specify_cli._locate_bundled_extension", return_value=None), \
+             patch.object(__import__("specify_cli._assets", fromlist=["AssetService"]).AssetService, "locate_bundled_extension", return_value=None), \
              patch.object(Path, "cwd", return_value=project_dir):
             result = runner.invoke(
                 app,

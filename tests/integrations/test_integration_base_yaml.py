@@ -152,7 +152,7 @@ class YamlIntegrationTests:
             content = f.read_text(encoding="utf-8")
             # Strip trailing source comment before parsing
             lines = content.split("\n")
-            yaml_lines = [l for l in lines if not l.startswith("# Source:")]
+            yaml_lines = [line for line in lines if not line.startswith("# Source:")]
             try:
                 parsed = yaml.safe_load("\n".join(yaml_lines))
             except Exception as exc:
@@ -183,7 +183,7 @@ class YamlIntegrationTests:
         content = cmd_files[0].read_text(encoding="utf-8")
         # Strip source comment for parsing
         lines = content.split("\n")
-        yaml_lines = [l for l in lines if not l.startswith("# Source:")]
+        yaml_lines = [line for line in lines if not line.startswith("# Source:")]
         parsed = yaml.safe_load("\n".join(yaml_lines))
 
         assert "description:" not in parsed["prompt"]
@@ -395,6 +395,7 @@ class YamlIntegrationTests:
                 "common.sh",
                 "create-new-feature.sh",
                 "setup-plan.sh",
+                "setup-tasks.sh",
             ]:
                 files.append(f".specify/scripts/bash/{name}")
         else:
@@ -403,6 +404,7 @@ class YamlIntegrationTests:
                 "common.ps1",
                 "create-new-feature.ps1",
                 "setup-plan.ps1",
+                "setup-tasks.ps1",
             ]:
                 files.append(f".specify/scripts/powershell/{name}")
 

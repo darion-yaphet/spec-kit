@@ -1,0 +1,337 @@
+import os
+import shutil
+import shlex
+import subprocess
+from pathlib import Path
+from typing import Any, Optional
+
+import typer
+
+from ._console import console
+from ._ui import StepTracker
+
+CLAUDE_LOCAL_PATH = Path.home() / ".claude" / "local" / "claude"
+CLAUDE_NPM_LOCAL_PATH = Path.home() / ".claude" / "local" / "node_modules" / ".bin" / "claude"
+
+
+# ---------------------------------------------------------------------------
+# Version helpers
+# ---------------------------------------------------------------------------
+
+def get_speckit_version() -> str:
+    """Get current spec-kit version."""
+    import importlib.metadata
+    try:
+        return importlib.metadata.version("specify-cli")
+    except Exception:
+        # Fallback: try reading from pyproject.toml
+        try:
+            import tomllib
+            pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
+            if pyproject_path.exists():
+                with open(pyproject_path, "rb") as f:
+                    data = tomllib.load(f)
+                    return data.get("project", {}).get("version", "unknown")
+        except Exception:
+            # Intentionally ignore any errors while reading/parsing pyproject.toml.
+            # If this lookup fails for any reason, we fall back to returning "unknown" below.
+            pass
+    return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Integration option parsing
+# ---------------------------------------------------------------------------
+
+def _parse_integration_options(integration: Any, raw_options: str) -> dict[str, Any] | None:
+    """Parse --integration-options string into a dict matching the integration's declared options.
+
+    Returns ``None`` when no options are provided.
+    """
+    parsed: dict[str, Any] = {}
+    tokens = shlex.split(raw_options)
+    declared_options = list(integration.options())
+    declared = {opt.name.lstrip("-"): opt for opt in declared_options}
+    allowed = ", ".join(sorted(opt.name for opt in declared_options))
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if not token.startswith("-"):
+            console.print(f"[red]Error:[/red] Unexpected integration option value '{token}'.")
+            if allowed:
+                console.print(f"Allowed options: {allowed}")
+            raise typer.Exit(1)
+        name = token.lstrip("-")
+        value: str | None = None
+        # Handle --name=value syntax
+        if "=" in name:
+            name, value = name.split("=", 1)
+        opt = declared.get(name)
+        if not opt:
+            console.print(f"[red]Error:[/red] Unknown integration option '{token}'.")
+            if allowed:
+                console.print(f"Allowed options: {allowed}")
+            raise typer.Exit(1)
+        key = name.replace("-", "_")
+        if opt.is_flag:
+            if value is not None:
+                console.print(f"[red]Error:[/red] Option '{opt.name}' is a flag and does not accept a value.")
+                raise typer.Exit(1)
+            parsed[key] = True
+            i += 1
+        elif value is not None:
+            parsed[key] = value
+            i += 1
+        elif i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+            parsed[key] = tokens[i + 1]
+            i += 2
+        else:
+            console.print(f"[red]Error:[/red] Option '{opt.name}' requires a value.")
+            raise typer.Exit(1)
+    return parsed or None
+
+
+# ---------------------------------------------------------------------------
+# Agent / integration configuration (computed at module load time)
+# ---------------------------------------------------------------------------
+
+def _build_agent_config() -> dict[str, dict[str, Any]]:
+    """Derive AGENT_CONFIG from INTEGRATION_REGISTRY."""
+    from .integrations import INTEGRATION_REGISTRY
+    config: dict[str, dict[str, Any]] = {}
+    for key, integration in INTEGRATION_REGISTRY.items():
+        if integration.config:
+            config[key] = dict(integration.config)
+    return config
+
+
+AGENT_CONFIG: dict[str, dict[str, Any]] = _build_agent_config()
+
+AI_ASSISTANT_ALIASES: dict[str, str] = {
+    "kiro": "kiro-cli",
+}
+
+SCRIPT_TYPE_CHOICES: dict[str, str] = {"sh": "POSIX Shell (bash/zsh)", "ps": "PowerShell"}
+
+
+def _build_ai_assistant_help() -> str:
+    """Build the --ai help text from AGENT_CONFIG so it stays in sync with runtime config."""
+
+    non_generic_agents = sorted(agent for agent in AGENT_CONFIG if agent != "generic")
+    base_help = (
+        f"AI assistant to use: {', '.join(non_generic_agents)}, "
+        "or generic (requires --ai-commands-dir)."
+    )
+
+    if not AI_ASSISTANT_ALIASES:
+        return base_help
+
+    alias_phrases = []
+    for alias, target in sorted(AI_ASSISTANT_ALIASES.items()):
+        alias_phrases.append(f"'{alias}' as an alias for '{target}'")
+
+    if len(alias_phrases) == 1:
+        aliases_text = alias_phrases[0]
+    else:
+        aliases_text = ', '.join(alias_phrases[:-1]) + ' and ' + alias_phrases[-1]
+
+    return base_help + " Use " + aliases_text + "."
+
+
+AI_ASSISTANT_HELP: str = _build_ai_assistant_help()
+
+
+def run_command(cmd: list[str], check_return: bool = True, capture: bool = False, shell: bool = False) -> Optional[str]:
+    """Run a shell command and optionally capture output."""
+    try:
+        if capture:
+            result = subprocess.run(cmd, check=check_return, capture_output=True, text=True, shell=shell)
+            return result.stdout.strip()
+        else:
+            subprocess.run(cmd, check=check_return, shell=shell)
+            return None
+    except subprocess.CalledProcessError as e:
+        if check_return:
+            console.print(f"[red]Error running command:[/red] {' '.join(cmd)}")
+            console.print(f"[red]Exit code:[/red] {e.returncode}")
+            if hasattr(e, 'stderr') and e.stderr:
+                console.print(f"[red]Error output:[/red] {e.stderr}")
+            raise
+        return None
+
+
+def check_tool(tool: str, tracker: StepTracker = None) -> bool:
+    """Check if a tool is installed. Optionally update tracker.
+
+    Args:
+        tool: Name of the tool to check
+        tracker: Optional StepTracker to update with results
+
+    Returns:
+        True if tool is found, False otherwise
+    """
+    # Special handling for Claude CLI local installs
+    # See: https://github.com/github/spec-kit/issues/123
+    # See: https://github.com/github/spec-kit/issues/550
+    # Claude Code can be installed in two local paths:
+    #   1. ~/.claude/local/claude          (after `claude migrate-installer`)
+    #   2. ~/.claude/local/node_modules/.bin/claude  (npm-local install, e.g. via nvm)
+    # Neither path may be on the system PATH, so we check them explicitly.
+    if tool == "claude":
+        if CLAUDE_LOCAL_PATH.is_file() or CLAUDE_NPM_LOCAL_PATH.is_file():
+            if tracker:
+                tracker.complete(tool, "available")
+            return True
+
+    if tool == "kiro-cli":
+        # Kiro currently supports both executable names. Prefer kiro-cli and
+        # accept kiro as a compatibility fallback.
+        found = shutil.which("kiro-cli") is not None or shutil.which("kiro") is not None
+    else:
+        found = shutil.which(tool) is not None
+
+    if tracker:
+        if found:
+            tracker.complete(tool, "available")
+        else:
+            tracker.error(tool, "not found")
+
+    return found
+
+
+def _install_shared_infra(
+    project_path: Path,
+    script_type: str,
+    tracker=None,
+    force: bool = False,
+    invoke_separator: str = ".",
+) -> bool:
+    """Install shared infrastructure files into *project_path*.
+
+    Delegates to ``shared_infra.install_shared_infra`` which provides
+    symlink-safe writes and atomic template updates.
+
+    Returns ``True`` on success.
+    """
+    import importlib.metadata
+    from .shared_infra import install_shared_infra
+    from ._assets import _asset_service as _svc
+
+    def _get_version() -> str:
+        try:
+            return importlib.metadata.version("specify-cli")
+        except Exception:
+            return "unknown"
+
+    return install_shared_infra(
+        project_path,
+        script_type,
+        version=_get_version(),
+        core_pack=_svc.locate_core_pack(),
+        repo_root=Path(__file__).parent.parent.parent,
+        console=console,
+        force=force,
+        invoke_separator=invoke_separator,
+    )
+
+
+def ensure_executable_scripts(project_path: Path, tracker: StepTracker | None = None) -> None:
+    """Ensure POSIX .sh scripts under .specify/scripts and .specify/extensions (recursively) have execute bits (no-op on Windows)."""
+    if os.name == "nt":
+        return  # Windows: skip silently
+    scan_roots = [
+        project_path / ".specify" / "scripts",
+        project_path / ".specify" / "extensions",
+    ]
+    failures: list[str] = []
+    updated = 0
+    for scripts_root in scan_roots:
+        if not scripts_root.is_dir():
+            continue
+        for script in scripts_root.rglob("*.sh"):
+            try:
+                if script.is_symlink() or not script.is_file():
+                    continue
+                try:
+                    with script.open("rb") as f:
+                        if f.read(2) != b"#!":
+                            continue
+                except Exception:
+                    continue
+                st = script.stat()
+                mode = st.st_mode
+                if mode & 0o111:
+                    continue
+                new_mode = mode
+                if mode & 0o400:
+                    new_mode |= 0o100
+                if mode & 0o040:
+                    new_mode |= 0o010
+                if mode & 0o004:
+                    new_mode |= 0o001
+                if not (new_mode & 0o100):
+                    new_mode |= 0o100
+                os.chmod(script, new_mode)
+                updated += 1
+            except Exception as e:
+                failures.append(f"{script.relative_to(project_path)}: {e}")
+    if tracker:
+        detail = f"{updated} updated" + (f", {len(failures)} failed" if failures else "")
+        tracker.add("chmod", "Set script permissions recursively")
+        (tracker.error if failures else tracker.complete)("chmod", detail)
+    else:
+        if updated:
+            console.print(f"[cyan]Updated execute permissions on {updated} script(s) recursively[/cyan]")
+        if failures:
+            console.print("[yellow]Some scripts could not be updated:[/yellow]")
+            for f in failures:
+                console.print(f"  - {f}")
+
+
+def ensure_constitution_from_template(project_path: Path, tracker: StepTracker | None = None) -> None:
+    """Copy constitution template to memory if it doesn't exist (preserves existing constitution on reinitialization)."""
+    memory_constitution = project_path / ".specify" / "memory" / "constitution.md"
+    template_constitution = project_path / ".specify" / "templates" / "constitution-template.md"
+
+    # If constitution already exists in memory, preserve it
+    if memory_constitution.exists():
+        if tracker:
+            tracker.add("constitution", "Constitution setup")
+            tracker.skip("constitution", "existing file preserved")
+        return
+
+    # If template doesn't exist, something went wrong with extraction
+    if not template_constitution.exists():
+        if tracker:
+            tracker.add("constitution", "Constitution setup")
+            tracker.error("constitution", "template not found")
+        return
+
+    # Copy template to memory directory
+    try:
+        memory_constitution.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(template_constitution, memory_constitution)
+        if tracker:
+            tracker.add("constitution", "Constitution setup")
+            tracker.complete("constitution", "copied from template")
+        else:
+            console.print("[cyan]Initialized constitution from template[/cyan]")
+    except Exception as e:
+        if tracker:
+            tracker.add("constitution", "Constitution setup")
+            tracker.error("constitution", str(e))
+        else:
+            console.print(f"[yellow]Warning: Could not initialize constitution: {e}[/yellow]")
+
+
+def _get_skills_dir(project_path: Path, selected_ai: str) -> Path:
+    """Resolve the agent-specific skills directory.
+
+    Returns ``project_path / <agent_folder> / "skills"``, falling back
+    to ``project_path / ".agents/skills"`` for unknown agents.
+    """
+    agent_config = AGENT_CONFIG.get(selected_ai, {})
+    agent_folder = agent_config.get("folder", "")
+    if agent_folder:
+        return project_path / agent_folder.rstrip("/") / "skills"
+    return project_path / ".agents" / "skills"
