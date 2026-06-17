@@ -26,11 +26,11 @@ import yaml
 from packaging import version as pkg_version
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
-from ._init_options import is_ai_skills_enabled
-from ._invocation_style import is_slash_skills_agent
-from ._utils import dump_frontmatter
-from .catalogs import CatalogEntry as BaseCatalogEntry
-from .catalogs import CatalogStackBase
+from .._init_options import is_ai_skills_enabled
+from .._invocation_style import is_slash_skills_agent
+from .._utils import dump_frontmatter
+from ..catalogs import CatalogEntry as BaseCatalogEntry
+from ..catalogs import CatalogStackBase
 
 _FALLBACK_CORE_COMMAND_NAMES = frozenset(
     {
@@ -893,7 +893,7 @@ class ExtensionManager:
         be created due to symlink, containment, or permission issues so
         that callers can fall back gracefully.
         """
-        from . import (
+        from .. import (
             _print_cli_warning,
             load_init_options,
             resolve_active_skills_dir,
@@ -936,7 +936,7 @@ class ExtensionManager:
         if not isinstance(selected_ai, str) or not selected_ai:
             return _ensure_usable(skills_dir)
 
-        from .agents import CommandRegistrar
+        from ..agents import CommandRegistrar
 
         registrar = CommandRegistrar()
         agent_config = registrar.AGENT_CONFIGS.get(selected_ai)
@@ -973,9 +973,9 @@ class ExtensionManager:
         if not skills_dir:
             return []
 
-        from . import load_init_options
-        from .agents import CommandRegistrar
-        from .integrations import get_integration
+        from .. import load_init_options
+        from ..agents import CommandRegistrar
+        from ..integrations import get_integration
 
         written: List[str] = []
         opts = load_init_options(self.project_root)
@@ -1199,7 +1199,7 @@ class ExtensionManager:
                 shutil.rmtree(skill_subdir)
         else:
             # Fallback: scan all possible agent skills directories
-            from . import AGENT_CONFIG, DEFAULT_SKILLS_DIR
+            from .. import AGENT_CONFIG, DEFAULT_SKILLS_DIR
 
             candidate_dirs: set[Path] = set()
             for cfg in AGENT_CONFIG.values():
@@ -1614,7 +1614,7 @@ class ExtensionManager:
         # Resolve the skills directory for the specific agent so cleanup is
         # agent-scoped and does not depend on the currently-active agent in
         # init-options.  Use the same helper that extension install uses.
-        from . import _get_skills_dir as resolve_skills_dir
+        from .. import _get_skills_dir as resolve_skills_dir
 
         agent_skills_dir = resolve_skills_dir(self.project_root, agent_name)
 
@@ -1690,7 +1690,7 @@ class ExtensionManager:
         if not agent_name:
             return
 
-        from . import load_init_options
+        from .. import load_init_options
 
         registrar = CommandRegistrar()
         agent_config = registrar.AGENT_CONFIGS.get(agent_name)
@@ -1844,31 +1844,31 @@ class CommandRegistrar:
     """
 
     # Re-export AGENT_CONFIGS at class level for direct attribute access
-    from .agents import CommandRegistrar as _AgentRegistrar
+    from ..agents import CommandRegistrar as _AgentRegistrar
 
     AGENT_CONFIGS = _AgentRegistrar.AGENT_CONFIGS
 
     def __init__(self):
-        from .agents import CommandRegistrar as _Registrar
+        from ..agents import CommandRegistrar as _Registrar
 
         self._registrar = _Registrar()
 
     # Delegate static/utility methods
     @staticmethod
     def parse_frontmatter(content: str) -> tuple[dict, str]:
-        from .agents import CommandRegistrar as _Registrar
+        from ..agents import CommandRegistrar as _Registrar
 
         return _Registrar.parse_frontmatter(content)
 
     @staticmethod
     def render_frontmatter(fm: dict) -> str:
-        from .agents import CommandRegistrar as _Registrar
+        from ..agents import CommandRegistrar as _Registrar
 
         return _Registrar.render_frontmatter(fm)
 
     @staticmethod
     def _write_copilot_prompt(project_root, cmd_name: str) -> None:
-        from .agents import CommandRegistrar as _Registrar
+        from ..agents import CommandRegistrar as _Registrar
 
         _Registrar.write_copilot_prompt(project_root, cmd_name)
 
@@ -2819,7 +2819,7 @@ class HookExecutor:
         instance to avoid repeated filesystem reads during hook rendering.
         """
         if self._init_options_cache is None:
-            from . import load_init_options
+            from .. import load_init_options
 
             payload = load_init_options(self.project_root)
             self._init_options_cache = payload if isinstance(payload, dict) else {}
@@ -2858,7 +2858,7 @@ class HookExecutor:
         if kimi_skill_mode and skill_name:
             return f"/skill:{skill_name}"
         if cline_mode:
-            from .integrations.cline import format_cline_command_name
+            from ..integrations.cline import format_cline_command_name
 
             return f"/{format_cline_command_name(command_id)}"
 
